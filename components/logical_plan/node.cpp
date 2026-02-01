@@ -42,7 +42,9 @@ namespace components::logical_plan {
     const std::pmr::vector<node_ptr>& node_t::children() const { return children_; }
     std::pmr::vector<node_ptr>& node_t::children() { return children_; }
 
-    const std::pmr::vector<expression_ptr>& node_t::expressions() const { return expressions_; }
+    const std::pmr::vector<expression_ptr>& node_t::expressions() const { return expressions_; 
+
+    std::pmr::vector<expression_ptr>& node_t::expressions() { return expressions_; }
 
     void node_t::reserve_child(std::size_t count) { children_.reserve(count); }
 

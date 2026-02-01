@@ -17,6 +17,7 @@ target_link_libraries(
         otterbrix::types
         otterbrix::expressions
         otterbrix::logical_plan
+        otterbrix::optimizer
         absl::int128
         Boost::boost
         magic_enum::magic_enum
