@@ -1,7 +1,9 @@
-project(planner CXX)
+project(optimizer CXX)
 
 set(SOURCE_${PROJECT_NAME}
-        planner.cpp
+        optimizer.cpp
+
+        rules/conjunction_simplification.cpp
 )
 
 add_library(otterbrix_${PROJECT_NAME}
@@ -14,11 +16,11 @@ set_property(TARGET otterbrix_${PROJECT_NAME} PROPERTY EXPORT_NAME ${PROJECT_NAM
 
 target_link_libraries(
         otterbrix_${PROJECT_NAME} PRIVATE
-        otterbrix::types
-        otterbrix::expressions
         otterbrix::logical_plan
-        otterbrix::optimizer
-        absl::int128
+        otterbrix::expressions
+        otterbrix::document
+        otterbrix::vector
+        otterbrix::serialization
         Boost::boost
         magic_enum::magic_enum
         msgpackc-cxx
