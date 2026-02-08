@@ -6,6 +6,8 @@
 #include <components/sql/transformer/transformer.hpp>
 #include <components/sql/transformer/utils.hpp>
 
+using components::sql::transform::pg_cell_to_node_cast;
+
 namespace {
 
     using components::logical_plan::node_ptr;
@@ -34,7 +36,10 @@ TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes dou
     // До оптимизации (как в sql тестах) было бы:
     // $aggregate: {$match: {$not: [$not: ["number": {$gte: #0}]]}}
     // После conjunction_simplification должно стать без $not.
-    REQUIRE(optimize_sql_to_string(&pool, query) == R"_($aggregate: {$match: {"number": {$gte: #0}}})_");
+    auto got = optimize_sql_to_string(&pool, query);
+    INFO(got);
+
+    REQUIRE(got == R"_($aggregate: {$match: {"number": {$gte: #0}}})_");
 }
 
 TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes double NOT inside AND") {
@@ -45,7 +50,10 @@ TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes dou
 
     // Ожидаем, что первая часть упростится до ("number": {$gte: #0}),
     // а AND сохранится.
-    REQUIRE(optimize_sql_to_string(&pool, query) ==
+    auto got = optimize_sql_to_string(&pool, query);
+    INFO(got);
+
+    REQUIRE(got ==
             R"_($aggregate: {$match: {$and: ["number": {$gte: #0}, "number": {$lte: #1}]}})_");
 }
 
@@ -55,6 +63,9 @@ TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes dou
     const std::string query =
         R"_(SELECT * FROM TestDatabase.TestCollection WHERE NOT (NOT (number >= 10)) OR number = 5;)_";
 
-    REQUIRE(optimize_sql_to_string(&pool, query) ==
+    auto got = optimize_sql_to_string(&pool, query);
+    INFO(got);
+
+    REQUIRE(got ==
             R"_($aggregate: {$match: {$or: ["number": {$gte: #0}, "number": {$eq: #1}]}})_");
 }
