@@ -353,10 +353,10 @@ namespace components::types {
             return static_cast<logical_type>(std::max(static_cast<uint8_t>(type1), static_cast<uint8_t>(type2)));
         } else if (is_signed(type1)) {
             return static_cast<logical_type>(
-                std::max<uint8_t>(static_cast<uint8_t>(type1), static_cast<uint8_t>(type2) - signage_difference));
+                std::max<uint8_t>(static_cast<uint8_t>(type1), static_cast<uint8_t>(static_cast<uint8_t>(type2) - signage_difference)));
         } else {
             return static_cast<logical_type>(
-                std::max<uint8_t>(static_cast<uint8_t>(type1) - signage_difference, static_cast<uint8_t>(type2)));
+                std::max<uint8_t>(static_cast<uint8_t>(static_cast<uint8_t>(type1) - signage_difference), static_cast<uint8_t>(type2)));
         }
     }
 
@@ -584,32 +584,6 @@ namespace components::types {
         uint8_t scale_;
     };
 
-    class enum_logical_type_extension : public logical_type_extension {
-    public:
-        explicit enum_logical_type_extension(std::string name, std::vector<logical_value_t> entries);
-
-        const std::string& type_name() { return type_name_; }
-        const std::vector<logical_value_t>& entries() const noexcept { return entries_; }
-
-        void serialize(serializer::msgpack_serializer_t* serializer) const override;
-        static std::unique_ptr<logical_type_extension> deserialize(serializer::msgpack_deserializer_t* deserializer);
-
-    private:
-        std::string type_name_;
-        std::vector<logical_value_t> entries_; // integer literal for value and alias for entry name
-    };
-
-    class user_logical_type_extension : public logical_type_extension {
-    public:
-        explicit user_logical_type_extension(std::string catalog, std::vector<logical_value_t> user_type_modifiers);
-
-        void serialize(serializer::msgpack_serializer_t* serializer) const override;
-        static std::unique_ptr<logical_type_extension> deserialize(serializer::msgpack_deserializer_t* deserializer);
-
-    private:
-        std::string catalog_;
-        std::vector<logical_value_t> user_type_modifiers_;
-    };
 
     class function_logical_type_extension : public logical_type_extension {
     public:
