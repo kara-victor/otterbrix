@@ -4,6 +4,7 @@ set(SOURCE_${PROJECT_NAME}
         optimizer.cpp
 
         rules/conjunction_simplification.cpp
+        rules/push_down.cpp
 )
 
 add_library(otterbrix_${PROJECT_NAME}
