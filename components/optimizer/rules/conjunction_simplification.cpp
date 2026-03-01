@@ -126,7 +126,12 @@ namespace components::optimizer::rules {
             return make_true(resource);
         }
 
+        std::cout << e->to_string() << " NOT node type: " << e->type() << std::endl;
+
         expression_ptr inner = simplify(resource, e->children().front());
+
+        std::cout << inner->to_string() << " INNER type: " << as_compare(inner)->type()
+                  << std::endl;
 
         if (is_true(inner)) {
             return make_false(resource);
