@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/services/dispatcher/tests/test_dispatcher_tests-b12d07c.cmake")
+  include("/app/build-docker/services/dispatcher/tests/test_dispatcher_tests-b12d07c.cmake")
+else()
+  add_test(test_dispatcher_NOT_BUILT-b12d07c test_dispatcher_NOT_BUILT-b12d07c)
+endif()

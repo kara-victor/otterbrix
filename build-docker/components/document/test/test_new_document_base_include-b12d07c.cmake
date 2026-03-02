@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/components/document/test/test_new_document_base_tests-b12d07c.cmake")
+  include("/app/build-docker/components/document/test/test_new_document_base_tests-b12d07c.cmake")
+else()
+  add_test(test_new_document_base_NOT_BUILT-b12d07c test_new_document_base_NOT_BUILT-b12d07c)
+endif()

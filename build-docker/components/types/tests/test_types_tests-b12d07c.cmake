@@ -1,0 +1,5 @@
+add_test( components::types::physical_value /app/build-docker/components/types/tests/test_types components::types::physical_value  )
+set_tests_properties( components::types::physical_value PROPERTIES WORKING_DIRECTORY /app/build-docker/components/types/tests)
+add_test( components::types::test_type_switch /app/build-docker/components/types/tests/test_types components::types::test_type_switch  )
+set_tests_properties( components::types::test_type_switch PROPERTIES WORKING_DIRECTORY /app/build-docker/components/types/tests)
+set( test_types_TESTS components::types::physical_value components::types::test_type_switch)

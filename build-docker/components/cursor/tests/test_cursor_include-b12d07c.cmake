@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/components/cursor/tests/test_cursor_tests-b12d07c.cmake")
+  include("/app/build-docker/components/cursor/tests/test_cursor_tests-b12d07c.cmake")
+else()
+  add_test(test_cursor_NOT_BUILT-b12d07c test_cursor_NOT_BUILT-b12d07c)
+endif()

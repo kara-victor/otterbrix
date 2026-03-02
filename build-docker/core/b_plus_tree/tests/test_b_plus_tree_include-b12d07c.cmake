@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/core/b_plus_tree/tests/test_b_plus_tree_tests-b12d07c.cmake")
+  include("/app/build-docker/core/b_plus_tree/tests/test_b_plus_tree_tests-b12d07c.cmake")
+else()
+  add_test(test_b_plus_tree_NOT_BUILT-b12d07c test_b_plus_tree_NOT_BUILT-b12d07c)
+endif()

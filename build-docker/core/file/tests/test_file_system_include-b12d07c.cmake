@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/core/file/tests/test_file_system_tests-b12d07c.cmake")
+  include("/app/build-docker/core/file/tests/test_file_system_tests-b12d07c.cmake")
+else()
+  add_test(test_file_system_NOT_BUILT-b12d07c test_file_system_NOT_BUILT-b12d07c)
+endif()

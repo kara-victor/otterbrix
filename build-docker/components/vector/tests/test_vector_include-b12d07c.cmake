@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/components/vector/tests/test_vector_tests-b12d07c.cmake")
+  include("/app/build-docker/components/vector/tests/test_vector_tests-b12d07c.cmake")
+else()
+  add_test(test_vector_NOT_BUILT-b12d07c test_vector_NOT_BUILT-b12d07c)
+endif()

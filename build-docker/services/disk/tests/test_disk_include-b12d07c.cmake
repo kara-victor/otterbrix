@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/services/disk/tests/test_disk_tests-b12d07c.cmake")
+  include("/app/build-docker/services/disk/tests/test_disk_tests-b12d07c.cmake")
+else()
+  add_test(test_disk_NOT_BUILT-b12d07c test_disk_NOT_BUILT-b12d07c)
+endif()

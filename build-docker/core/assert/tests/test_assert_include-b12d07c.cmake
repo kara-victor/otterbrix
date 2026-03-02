@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/core/assert/tests/test_assert_tests-b12d07c.cmake")
+  include("/app/build-docker/core/assert/tests/test_assert_tests-b12d07c.cmake")
+else()
+  add_test(test_assert_NOT_BUILT-b12d07c test_assert_NOT_BUILT-b12d07c)
+endif()

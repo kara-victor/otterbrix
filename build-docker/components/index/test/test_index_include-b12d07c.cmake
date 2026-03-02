@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/components/index/test/test_index_tests-b12d07c.cmake")
+  include("/app/build-docker/components/index/test/test_index_tests-b12d07c.cmake")
+else()
+  add_test(test_index_NOT_BUILT-b12d07c test_index_NOT_BUILT-b12d07c)
+endif()

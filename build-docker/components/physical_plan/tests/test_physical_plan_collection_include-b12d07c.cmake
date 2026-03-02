@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/components/physical_plan/tests/test_physical_plan_collection_tests-b12d07c.cmake")
+  include("/app/build-docker/components/physical_plan/tests/test_physical_plan_collection_tests-b12d07c.cmake")
+else()
+  add_test(test_physical_plan_collection_NOT_BUILT-b12d07c test_physical_plan_collection_NOT_BUILT-b12d07c)
+endif()

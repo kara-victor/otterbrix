@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/services/wal/tests/test_wal_tests-b12d07c.cmake")
+  include("/app/build-docker/services/wal/tests/test_wal_tests-b12d07c.cmake")
+else()
+  add_test(test_wal_NOT_BUILT-b12d07c test_wal_NOT_BUILT-b12d07c)
+endif()

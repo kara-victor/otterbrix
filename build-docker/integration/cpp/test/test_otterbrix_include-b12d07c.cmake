@@ -1,0 +1,5 @@
+if(EXISTS "/app/build-docker/integration/cpp/test/test_otterbrix_tests-b12d07c.cmake")
+  include("/app/build-docker/integration/cpp/test/test_otterbrix_tests-b12d07c.cmake")
+else()
+  add_test(test_otterbrix_NOT_BUILT-b12d07c test_otterbrix_NOT_BUILT-b12d07c)
+endif()
