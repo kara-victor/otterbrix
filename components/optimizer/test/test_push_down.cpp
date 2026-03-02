@@ -1,10 +1,12 @@
 #include <catch2/catch.hpp>
 
-#include <components/expressions/compare_expression.hpp>
-#include <components/logical_plan/node_aggregate.hpp>
-#include <components/logical_plan/node_join.hpp>
-#include <components/logical_plan/node_match.hpp>
 #include <components/optimizer/rules/push_down.hpp>
+
+#include <components/sql/parser/parser.h>
+#include <components/sql/transformer/transformer.hpp>
+#include <components/sql/transformer/utils.hpp>
+
+using components::sql::transform::pg_cell_to_node_cast;
 
 namespace {
 
@@ -22,25 +24,15 @@ namespace {
     using components::logical_plan::make_node_match;
     using components::logical_plan::node_ptr;
 
-    collection_full_name_t col(std::string_view name) {
-        return {std::pmr::string{"db"}, std::pmr::string{name}};
-    }
-
-    compare_expression_ptr eq_join_id(std::pmr::memory_resource* resource) {
-        return make_compare_expression(resource,
-                                       compare_type::eq,
-                                       key_t(resource, "id", side_t::left),
-                                       key_t(resource, "id_col1", side_t::right));
-    }
+    node_ptr apply_push_down_to_node(std::pmr::memory_resource* resource, const std::string& query) {
+        std::pmr::monotonic_buffer_resource arena_resource(resource);
 
     compare_expression_ptr left_score_gte(std::pmr::memory_resource* resource, uint16_t param) {
         return make_compare_expression(
             resource, compare_type::gte, key_t(resource, "score", side_t::left), core::parameter_id_t(param));
     }
 
-    compare_expression_ptr right_score_gte(std::pmr::memory_resource* resource, uint16_t param) {
-        return make_compare_expression(
-            resource, compare_type::gte, key_t(resource, "score", side_t::right), core::parameter_id_t(param));
+        return components::optimizer::rules::push_down_t{}.apply(resource, result.node);
     }
 
     compare_expression_ptr unknown_constant(std::pmr::memory_resource* resource, uint16_t param) {
@@ -147,11 +139,8 @@ TEST_CASE("components::optimizer::push_down: unknown-side predicate stays on joi
 TEST_CASE("components::optimizer::push_down: non-inner join keeps side-specific predicates on join") {
     auto pool = std::pmr::synchronized_pool_resource();
 
-    auto join = make_node_join(&pool, col("join"), join_type::left);
-    join->append_child(make_node_aggregate(&pool, col("col1")));
-    join->append_child(make_node_aggregate(&pool, col("col2")));
-    join->append_expression(eq_join_id(&pool));
-    join->append_expression(left_score_gte(&pool, 0));
+    auto got = apply_push_down_to_node(&pool, query);
+    INFO(got->to_string());
 
     auto got = components::optimizer::rules::push_down_t{}.apply(&pool, join);
     const auto got_str = got->to_string();
@@ -169,8 +158,8 @@ TEST_CASE("components::optimizer::push_down: match above inner join is distribut
     top_match_expr->append_child(left_score_gte(&pool, 0));
     top_match_expr->append_child(right_score_gte(&pool, 1));
 
-    auto top_match = make_node_match(&pool, col("join"), top_match_expr);
-    top_match->append_child(join);
+    auto got = apply_push_down_to_node(&pool, query);
+    INFO(got->to_string());
 
     auto got = components::optimizer::rules::push_down_t{}.apply(&pool, top_match);
     const auto got_str = got->to_string();
@@ -189,9 +178,10 @@ TEST_CASE("components::optimizer::push_down: aggregate child matches are pushed 
     auto left_match = make_node_match(&pool, col("left_filter"), left_score_gte(&pool, 2));
     auto right_match = make_node_match(&pool, col("right_filter"), right_score_gte(&pool, 3));
 
-    aggregate->append_child(left_match);
-    aggregate->append_child(join);
-    aggregate->append_child(right_match);
+    auto got = apply_push_down_to_node(&pool, query);
+    auto got_not_optimize = sql_to_node(&pool, query);
+    INFO(got->to_string());
+    INFO(got_not_optimize->to_string());
 
     auto got = components::optimizer::rules::push_down_t{}.apply(&pool, aggregate);
     const auto got_str = got->to_string();
