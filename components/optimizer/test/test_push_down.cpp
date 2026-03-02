@@ -1,6 +1,5 @@
 #include <catch2/catch.hpp>
 
-#include <components/base/collection_full_name.hpp>
 #include <components/expressions/compare_expression.hpp>
 #include <components/logical_plan/node_aggregate.hpp>
 #include <components/logical_plan/node_join.hpp>
@@ -19,7 +18,7 @@ namespace {
     using components::logical_plan::node_ptr;
     using key = components::expressions::key_t;
 
-    collection_full_name_t col(std::string_view collection) {
+    components::collection_full_name_t col(std::string_view collection) {
         return {"db", std::string(collection)};
     }
 
