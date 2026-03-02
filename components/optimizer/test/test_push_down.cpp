@@ -18,7 +18,7 @@ namespace {
     using components::logical_plan::node_ptr;
     using key = components::expressions::key_t;
 
-    components::collection_full_name_t col(std::string_view collection) {
+    collection_full_name_t col(std::string_view collection) {
         return {"db", std::string(collection)};
     }
 
