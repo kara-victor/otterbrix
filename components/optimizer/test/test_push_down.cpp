@@ -1,6 +1,6 @@
 #include <catch2/catch.hpp>
 
-#include <components/optimizer/optimizer.hpp>
+#include <components/optimizer/rules/push_down.hpp>
 
 #include <components/sql/parser/parser.h>
 #include <components/sql/transformer/transformer.hpp>
@@ -12,7 +12,7 @@ namespace {
 
     using components::logical_plan::node_ptr;
 
-    node_ptr optimize_sql_to_node(std::pmr::memory_resource* resource, const std::string& query) {
+    node_ptr apply_push_down_to_node(std::pmr::memory_resource* resource, const std::string& query) {
         std::pmr::monotonic_buffer_resource arena_resource(resource);
 
         auto stmt = linitial(raw_parser(&arena_resource, query.c_str()));
@@ -20,8 +20,7 @@ namespace {
         auto result = std::get<components::sql::transform::result_view>(
             transformer.transform(pg_cell_to_node_cast(stmt)).finalize());
 
-        components::optimizer::optimizer_t optimizer;
-        return optimizer.optimize(resource, result.node);
+        return components::optimizer::rules::push_down_t{}.apply(resource, result.node);
     }
 
     node_ptr sql_to_node(std::pmr::memory_resource* resource, const std::string& query) {
@@ -45,7 +44,7 @@ TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushe
     const std::string target_query =
         R"_(SELECT * FROM col1 JOIN col2 ON col1.id = col2.id_col1 AND col1.score >= 10;)_";
 
-    auto got = optimize_sql_to_node(&pool, query);
+    auto got = apply_push_down_to_node(&pool, query);
     INFO(got->to_string());
 
     auto should_get = sql_to_node(&pool, target_query);
@@ -62,7 +61,7 @@ TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushe
     const std::string target_query =
         R"_(SELECT * FROM col1 JOIN col2 ON col1.id = col2.id_col1 AND col2.score >= 10;)_";
 
-    auto got = optimize_sql_to_node(&pool, query);
+    auto got = apply_push_down_to_node(&pool, query);
     INFO(got->to_string());
 
     auto should_get = sql_to_node(&pool, target_query);
@@ -79,7 +78,7 @@ TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushe
     const std::string target_query =
         R"_(SELECT * FROM col1 JOIN col2 ON col1.id = col2.id_col1 AND col2.score >= 10 AND col1.score >= 10;)_";
 
-    auto got = optimize_sql_to_node(&pool, query);
+    auto got = apply_push_down_to_node(&pool, query);
     auto got_not_optimize = sql_to_node(&pool, query);
     INFO(got->to_string());
     INFO(got_not_optimize->to_string());
