@@ -40,7 +40,7 @@ TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushe
     auto should_get = optimize_sql_to_node(&pool, target_query);
     INFO(should_get->to_string());
 
-    REQUIRE(*got == *should_get);
+    REQUIRE(got->to_string() == should_get->to_string());
 }
 
 TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushed to right side") {
@@ -57,5 +57,5 @@ TEST_CASE("components::optimizer::push_down: filter from JOIN condition is pushe
     auto should_get = optimize_sql_to_node(&pool, target_query);
     INFO(should_get->to_string());
 
-    REQUIRE(*got == *should_get);
+    REQUIRE(got->to_string() == should_get->to_string());
 }
