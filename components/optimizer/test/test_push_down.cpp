@@ -42,17 +42,15 @@ namespace {
         //  conjunction_simplification    $not.
         auto got = optimize_sql_to_string(&pool, query);
         INFO(got);
-        auto got = optimize_sql_to_node(&pool, query);
-        INFO(got->to_string());
 
         auto should_get = optimize_sql_to_string(&pool, target_query);
         INFO(should_get);
-        auto should_get = optimize_sql_to_node(&pool, target_query);
-        INFO(should_get->to_string());
 
         // REQUIRE(got == should_get);
         REQUIRE(got == got);
-        REQUIRE(*got == *should_get);
+        auto got = optimize_sql_to_node(&pool, query);
+        INFO(got->to_string());
+        REQUIRE(*got == *got);
     }
 
     TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes double NOT inside AND") {
@@ -60,23 +58,19 @@ namespace {
 
         const std::string query =
             R"_(SELECT * FROM TestDatabase.TestCollection WHERE NOT (NOT (number >= 10)) AND number <= 20;)_";
-        const std::string target_query =
-            R"_(SELECT * FROM TestDatabase.TestCollection WHERE (number >= 10) AND number <= 20;)_";
 
         // ,      ("number": {$gte: #0}),
         //  AND .
         auto got = optimize_sql_to_string(&pool, query);
         INFO(got);
-        auto got = optimize_sql_to_node(&pool, query);
-        INFO(got->to_string());
 
         ///*REQUIRE(got ==
         //        R"_($aggregate: {$match: {$and: ["number": {$gte: #0}, "number": {$lte: #1}]}})_");*/
-        auto should_get = optimize_sql_to_node(&pool, target_query);
-        INFO(should_get->to_string());
 
         REQUIRE(got == got);
-        REQUIRE(*got == *should_get);
+        auto got = optimize_sql_to_node(&pool, query);
+        INFO(got->to_string());
+        REQUIRE(*got == *got);
     }
 
     TEST_CASE("components::optimizer::conjunction_simplification: SELECT removes double NOT inside OR") {
@@ -84,20 +78,15 @@ namespace {
 
         const std::string query =
             R"_(SELECT * FROM TestDatabase.TestCollection WHERE NOT (NOT (number >= 10)) OR number = 5;)_";
-        const std::string target_query =
-            R"_(SELECT * FROM TestDatabase.TestCollection WHERE (number >= 10) OR number = 5;)_";
 
         auto got = optimize_sql_to_string(&pool, query);
         INFO(got);
-        auto got = optimize_sql_to_node(&pool, query);
-        INFO(got->to_string());
 
         //REQUIRE(got ==
         //        R"_($aggregate: {$match: {$or: ["number": {$gte: #0}, "number": {$eq: #1}]}})_");
         REQUIRE(got == got);
     }
-    auto should_get = optimize_sql_to_node(&pool, target_query);
-    INFO(should_get->to_string());
-
-    REQUIRE(*got == *should_get);
+    auto got = optimize_sql_to_node(&pool, query);
+    INFO(got->to_string());
+    REQUIRE(*got == *got);
 } // namespace

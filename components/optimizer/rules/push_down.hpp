@@ -24,7 +24,7 @@ namespace components::optimizer::rules {
             both
         };
 
-        void rewrite_plan(std::pmr::memory_resource* resource, const node_ptr& node);
+        void rewrite_plan(std::pmr::memory_resource* resource, node_ptr& node);
 
         std::pmr::vector<expression_ptr> split_and_conjuncts(std::pmr::memory_resource* resource,
                                                              const expression_ptr& expression);

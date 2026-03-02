@@ -2,8 +2,6 @@
 
 #include <components/logical_plan/node.hpp>
 
-
-
 namespace components::optimizer {
 
 	class optimizer_t {
