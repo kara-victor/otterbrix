@@ -1,5 +1,0 @@
-add_test( core::assert::test_ok /app/build-docker/core/assert/tests/test_assert core::assert::test_ok  )
-set_tests_properties( core::assert::test_ok PROPERTIES WORKING_DIRECTORY /app/build-docker/core/assert/tests)
-add_test( core::assert::test_string_view /app/build-docker/core/assert/tests/test_assert core::assert::test_string_view  )
-set_tests_properties( core::assert::test_string_view PROPERTIES WORKING_DIRECTORY /app/build-docker/core/assert/tests)
-set( test_assert_TESTS core::assert::test_ok core::assert::test_string_view)

@@ -11,7 +11,7 @@ BuildDirectory: /app/build-docker/components/sql/test
 CostDataFile: 
 
 # Site is something like machine.domain, i.e. pragmatic.crd
-Site: e807025dbfc7
+Site: 87878a41cfb2
 
 # Build name is osname-revision-compiler, i.e. Linux-2.4.2-2smp-c++
 BuildName: Linux-c++

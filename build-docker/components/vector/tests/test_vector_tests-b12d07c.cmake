@@ -1,5 +1,0 @@
-add_test( components::vector::vector /app/build-docker/components/vector/tests/test_vector components::vector::vector  )
-set_tests_properties( components::vector::vector PROPERTIES WORKING_DIRECTORY /app/build-docker/components/vector/tests)
-add_test( components::vector::data_chunk_to_arrow /app/build-docker/components/vector/tests/test_vector components::vector::data_chunk_to_arrow  )
-set_tests_properties( components::vector::data_chunk_to_arrow PROPERTIES WORKING_DIRECTORY /app/build-docker/components/vector/tests)
-set( test_vector_TESTS components::vector::vector components::vector::data_chunk_to_arrow)
