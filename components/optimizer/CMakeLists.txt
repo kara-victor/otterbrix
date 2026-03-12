@@ -3,6 +3,10 @@ project(optimizer CXX)
 set(SOURCE_${PROJECT_NAME}
         optimizer.cpp
 
+        cbo/cost_model.cpp
+        cbo/stats_provider.cpp
+        cbo/estimator.cpp
+
         rules/conjunction_simplification.cpp
         rules/push_down.cpp
 )
