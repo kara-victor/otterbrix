@@ -5,6 +5,7 @@ add_definitions(-DDEV_MODE)
 set(${PROJECT_NAME}_SOURCES
         test_conjunction_simplification.cpp
         test_push_down.cpp
+        test_enumerator.cpp
 
 )
 

@@ -6,6 +6,7 @@ set(SOURCE_${PROJECT_NAME}
         cbo/cost_model.cpp
         cbo/stats_provider.cpp
         cbo/estimator.cpp
+        cbo/enumerator.cpp
 
         rules/conjunction_simplification.cpp
         rules/push_down.cpp
