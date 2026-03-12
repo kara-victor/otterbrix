@@ -8,7 +8,9 @@ namespace components::optimizer::cbo {
         double cpu{0.0};
         double io{0.0};
 
-        double total() const { return cpu + io; }
+        double total() const { 
+            return cpu + io; 
+        }
     };
 
     class cost_model_t {
@@ -19,8 +21,8 @@ namespace components::optimizer::cbo {
         plan_cost_t estimate_join_cost(double left_rows, double right_rows) const;
 
     private:
-        static constexpr double index_scan_row_factor = 0.2;
-        static constexpr double join_factor = 1.0;
+        double index_scan_row_factor = 0.2;
+        double join_factor = 1.0;
     };
 
 } // namespace components::optimizer::cbo
