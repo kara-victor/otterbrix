@@ -13,7 +13,7 @@ namespace components::optimizer::cbo {
 
     table_stats_t stats_provider_t::get_table_stats(const collection_full_name_t&) const { return {default_row_count}; }
 
-    predicate_stats_t stats_provider_t::est€imate_selectivity(const expressions::expression_ptr& expression) const {
+    predicate_stats_t stats_provider_t::estimate_selectivity(const expressions::expression_ptr& expression) const {
         if (!expression) {
             return {unknown_selectivity};
         }
