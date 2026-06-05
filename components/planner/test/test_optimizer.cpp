@@ -4,6 +4,7 @@
 #include <components/expressions/scalar_expression.hpp>
 #include <components/logical_plan/node_aggregate.hpp>
 #include <components/logical_plan/node_group.hpp>
+#include <components/logical_plan/node_join.hpp>
 #include <components/logical_plan/node_match.hpp>
 #include <components/logical_plan/node_sort.hpp>
 #include <components/logical_plan/param_storage.hpp>
@@ -846,6 +847,76 @@ TEST_CASE("optimizer::has_index_on_empty") {
 }
 
 // ================================================================
+// Pipeline architecture: public entries preserve null-root behavior
+// ================================================================
+TEST_CASE("optimizer_pipeline::null_root_is_stable") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+
+    REQUIRE(components::planner::optimize(&resource, nullptr, params.get()) == nullptr);
+    REQUIRE(components::planner::post_validate_optimize(&resource, nullptr) == nullptr);
+}
+
+// ================================================================
+// Pipeline architecture: early RBO can run without parameter storage
+// ================================================================
+TEST_CASE("optimizer_pipeline::early_rbo_without_parameters_is_noop") {
+    auto resource = std::pmr::synchronized_pool_resource();
+
+    auto scalar = make_scalar_expression(&resource, scalar_type::add);
+    scalar->append_param(core::parameter_id_t{0});
+    scalar->append_param(core::parameter_id_t{1});
+
+    auto comp = make_compare_expression(&resource,
+                                        compare_type::eq,
+                                        key(&resource, "field", side_t::left),
+                                        expression_ptr(scalar));
+    auto node = make_match_with_expr(&resource, comp);
+
+    auto result = components::planner::optimize(&resource, node, nullptr);
+
+    REQUIRE(result == node);
+    auto* s = static_cast<scalar_expression_t*>(scalar.get());
+    REQUIRE(s->params().size() == 2);
+    REQUIRE(std::get<core::parameter_id_t>(s->params()[0]) == core::parameter_id_t{0});
+    REQUIRE(std::get<core::parameter_id_t>(s->params()[1]) == core::parameter_id_t{1});
+}
+
+// ================================================================
+// Pipeline architecture: late RBO still owns the hash-join rewrite
+// ================================================================
+TEST_CASE("optimizer_pipeline::late_rbo_rewrites_equi_join_to_hash_join") {
+    auto resource = std::pmr::synchronized_pool_resource();
+
+    auto left = key(&resource, "left_id", side_t::left);
+    left.path().push_back(2);
+    auto right = key(&resource, "right_id", side_t::right);
+    right.path().push_back(5);
+
+    auto comp = make_compare_expression(&resource, compare_type::eq, left, right);
+    auto join = make_node_join(&resource, core::dbname_t{}, core::relname_t{}, join_type::inner);
+    join->append_expression(comp);
+    join->append_child(make_node_match(&resource,
+                                       core::dbname_t{database_name},
+                                       core::relname_t{"left_collection"},
+                                       make_compare_expression(&resource, compare_type::all_true)));
+    join->append_child(make_node_match(&resource,
+                                       core::dbname_t{database_name},
+                                       core::relname_t{"right_collection"},
+                                       make_compare_expression(&resource, compare_type::all_true)));
+
+    auto result = components::planner::post_validate_optimize(&resource, join);
+
+    REQUIRE(result->type() == node_type::hash_join_t);
+    auto* hash_join = static_cast<node_hash_join_t*>(result.get());
+    REQUIRE(hash_join->type() == join_type::inner);
+    REQUIRE(hash_join->left_col() == std::size_t{2});
+    REQUIRE(hash_join->right_col() == std::size_t{5});
+    REQUIRE(result->children().size() == 2);
+    REQUIRE(result->expressions().size() == 1);
+}
+
+// ================================================================
 // Diagnostic: parameter copy chain
 // ================================================================
 TEST_CASE("optimizer::param_copy_survives") {
@@ -1007,8 +1078,7 @@ TEST_CASE("create_plan_match::union_compare_uses_full_scan") {
     auto union_expr = make_compare_union_expression(&resource, compare_type::union_and);
     union_expr->append_child(make_compare_expression(&resource, compare_type::gte, key(&resource, "age"), pid));
 
-    auto node =
-        make_node_match(&resource, core::dbname_t{database_name}, core::relname_t{collection_name}, union_expr);
+    auto node = make_node_match(&resource, core::dbname_t{database_name}, core::relname_t{collection_name}, union_expr);
     node->set_table_oid(table_oid);
 
     auto op = services::planner::impl::create_plan_match(ctx, node, components::logical_plan::limit_t::unlimit());

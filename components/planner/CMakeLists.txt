@@ -3,6 +3,7 @@ project(planner CXX)
 set(SOURCE_${PROJECT_NAME}
         planner.cpp
         optimizer.cpp
+        optimizer/pipeline.cpp
         optimizer/rules/constant_folding.cpp
         optimizer/rules/column_pruning.cpp
         optimizer/rules/hash_join.cpp
