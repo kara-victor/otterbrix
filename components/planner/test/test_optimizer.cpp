@@ -1,10 +1,19 @@
 #include <catch2/catch.hpp>
 
+#include <cstdint>
+#include <memory_resource>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <components/expressions/compare_expression.hpp>
 #include <components/expressions/scalar_expression.hpp>
 #include <components/logical_plan/node_aggregate.hpp>
+#include <components/logical_plan/node_catalog_resolve_table.hpp>
 #include <components/logical_plan/node_group.hpp>
+#include <components/logical_plan/node_join.hpp>
 #include <components/logical_plan/node_match.hpp>
+#include <components/logical_plan/node_sequence.hpp>
 #include <components/logical_plan/node_sort.hpp>
 #include <components/logical_plan/param_storage.hpp>
 #include <components/physical_plan/operators/scan/index_scan.hpp>
@@ -25,6 +34,178 @@ constexpr auto collection_name = "collection";
 // ================================================================
 static node_ptr make_match_with_expr(std::pmr::memory_resource* r, const expression_ptr& expr) {
     return make_node_match(r, core::dbname_t{database_name}, core::relname_t{collection_name}, expr);
+}
+
+static key make_resolved_key(std::pmr::memory_resource* r, const char* name, side_t side, size_t col) {
+    key result{r, name, side};
+    std::pmr::vector<size_t> path{r};
+    path.push_back(col);
+    result.set_path(std::move(path));
+    return result;
+}
+
+static resolved_table_metadata_t make_resolved_table_metadata(size_t column_count) {
+    resolved_table_metadata_t md;
+    md.table_oid = components::catalog::oid_t{9001};
+    md.namespace_oid = components::catalog::oid_t{9000};
+    md.name = collection_name;
+    for (size_t i = 0; i < column_count; ++i) {
+        resolved_column_metadata_t col;
+        col.attname = "c" + std::to_string(i);
+        col.attnum = static_cast<std::int32_t>(i + 1);
+        col.chunk_position = static_cast<std::int32_t>(i);
+        md.columns.push_back(std::move(col));
+    }
+    return md;
+}
+
+static node_aggregate_ptr make_prunable_aggregate_plan(std::pmr::memory_resource* r) {
+    auto aggregate = make_node_aggregate(r, core::dbname_t{database_name}, core::relname_t{collection_name});
+    aggregate->set_table_oid(components::catalog::oid_t{9001});
+
+    auto projection = make_scalar_expression(r, scalar_type::get_field, make_resolved_key(r, "c1", side_t::left, 1));
+    auto group = make_node_group(r, core::dbname_t{database_name}, core::relname_t{collection_name});
+    group->append_expression(projection);
+
+    auto pid_params = make_parameter_node(r);
+    auto pid = pid_params->add_parameter(int64_t(10));
+    auto predicate = make_compare_expression(r, compare_type::gt, make_resolved_key(r, "c2", side_t::left, 2), pid);
+    auto match = make_node_match(r, core::dbname_t{database_name}, core::relname_t{collection_name}, predicate);
+
+    aggregate->append_child(group);
+    aggregate->append_child(match);
+    return aggregate;
+}
+
+// ================================================================
+// Pipeline: default pre-validate keeps existing constant folding behavior
+// ================================================================
+TEST_CASE("optimizer_pipeline::pre_validate_default_folds_constants") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto id0 = params->add_parameter(int64_t(2));
+    auto id1 = params->add_parameter(int64_t(3));
+
+    auto scalar = make_scalar_expression(&resource, scalar_type::add);
+    scalar->append_param(id0);
+    scalar->append_param(id1);
+    auto node = make_match_with_expr(&resource,
+                                     make_compare_expression(&resource,
+                                                             compare_type::eq,
+                                                             key(&resource, "field", side_t::left),
+                                                             expression_ptr(scalar)));
+
+    components::planner::optimizer_context_t context{&resource, params.get(), {}};
+    auto result = components::planner::optimizer_pipeline_t(context).run_pre_validate(node);
+
+    REQUIRE(result.get() == node.get());
+    auto* folded = static_cast<scalar_expression_t*>(scalar.get());
+    REQUIRE(folded->params().size() == 1);
+    auto new_id = std::get<core::parameter_id_t>(folded->params()[0]);
+    REQUIRE(params->parameter(new_id).value<int64_t>() == 5);
+}
+
+// ================================================================
+// Pipeline: constant folding can be disabled
+// ================================================================
+TEST_CASE("optimizer_pipeline::pre_validate_can_disable_constant_folding") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto id0 = params->add_parameter(int64_t(2));
+    auto id1 = params->add_parameter(int64_t(3));
+
+    auto scalar = make_scalar_expression(&resource, scalar_type::add);
+    scalar->append_param(id0);
+    scalar->append_param(id1);
+    auto node = make_match_with_expr(&resource,
+                                     make_compare_expression(&resource,
+                                                             compare_type::eq,
+                                                             key(&resource, "field", side_t::left),
+                                                             expression_ptr(scalar)));
+
+    components::planner::optimizer_options_t options;
+    options.enable_constant_folding = false;
+    components::planner::optimizer_context_t context{&resource, params.get(), options};
+    components::planner::optimizer_pipeline_t(context).run_pre_validate(node);
+
+    auto* unchanged = static_cast<scalar_expression_t*>(scalar.get());
+    REQUIRE(unchanged->params().size() == 2);
+    REQUIRE(std::get<core::parameter_id_t>(unchanged->params()[0]) == id0);
+    REQUIRE(std::get<core::parameter_id_t>(unchanged->params()[1]) == id1);
+    REQUIRE(params->parameter(id0).value<int64_t>() == 2);
+}
+
+// ================================================================
+// Pipeline: default post-validate keeps existing hash-join rewrite behavior
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_default_rewrites_hash_join") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto join = make_node_join(&resource, core::dbname_t{}, core::relname_t{}, join_type::inner);
+    join->append_expression(make_compare_expression(&resource,
+                                                    compare_type::eq,
+                                                    make_resolved_key(&resource, "l", side_t::left, 0),
+                                                    make_resolved_key(&resource, "r", side_t::right, 0)));
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    auto result = components::planner::optimizer_pipeline_t(context).run_post_validate(join);
+
+    REQUIRE(result->type() == node_type::hash_join_t);
+}
+
+// ================================================================
+// Pipeline: hash-join rewrite can be disabled
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_can_disable_hash_join_rewrite") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto join = make_node_join(&resource, core::dbname_t{}, core::relname_t{}, join_type::inner);
+    join->append_expression(make_compare_expression(&resource,
+                                                    compare_type::eq,
+                                                    make_resolved_key(&resource, "l", side_t::left, 0),
+                                                    make_resolved_key(&resource, "r", side_t::right, 0)));
+
+    components::planner::optimizer_options_t options;
+    options.enable_hash_join_rewrite = false;
+    components::planner::optimizer_context_t context{&resource, nullptr, options};
+    auto result = components::planner::optimizer_pipeline_t(context).run_post_validate(join);
+
+    REQUIRE(result.get() == join.get());
+    REQUIRE(result->type() == node_type::join_t);
+}
+
+// ================================================================
+// Pipeline: column pruning remains disabled by default
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_default_keeps_column_pruning_disabled") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto aggregate = make_prunable_aggregate_plan(&resource);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(aggregate);
+
+    REQUIRE(aggregate->projected_cols().empty());
+}
+
+// ================================================================
+// Pipeline: column pruning can be enabled explicitly
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_can_enable_column_pruning") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto aggregate = make_prunable_aggregate_plan(&resource);
+    auto resolve =
+        make_node_catalog_resolve_table(&resource, core::dbname_t{database_name}, core::relname_t{collection_name});
+    resolve->set_resolved_metadata(make_resolved_table_metadata(3));
+
+    node_sequence_ptr sequence{new node_sequence_t(&resource)};
+    sequence->append_child(resolve);
+    sequence->append_child(aggregate);
+
+    components::planner::optimizer_options_t options;
+    options.enable_column_pruning = true;
+    components::planner::optimizer_context_t context{&resource, nullptr, options};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(sequence);
+
+    const std::vector<size_t> expected{1, 2};
+    REQUIRE(aggregate->projected_cols() == expected);
 }
 
 // ================================================================

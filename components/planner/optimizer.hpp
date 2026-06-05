@@ -1,9 +1,34 @@
 #pragma once
 
+#include <memory_resource>
+
 #include <components/logical_plan/node.hpp>
 #include <components/logical_plan/param_storage.hpp>
 
 namespace components::planner {
+
+    struct optimizer_options_t {
+        bool enable_constant_folding{true};
+        bool enable_hash_join_rewrite{true};
+        bool enable_column_pruning{false};
+    };
+
+    struct optimizer_context_t {
+        std::pmr::memory_resource* resource{nullptr};
+        logical_plan::parameter_node_t* parameters{nullptr};
+        optimizer_options_t options{};
+    };
+
+    class optimizer_pipeline_t {
+    public:
+        explicit optimizer_pipeline_t(optimizer_context_t context);
+
+        logical_plan::node_ptr run_pre_validate(logical_plan::node_ptr node) const;
+        logical_plan::node_ptr run_post_validate(logical_plan::node_ptr node) const;
+
+    private:
+        optimizer_context_t context_;
+    };
 
     // Early optimization pass. Runs BEFORE the schema validator / enrich.
     // Safe rules only — those that don't need resolved column indices or
