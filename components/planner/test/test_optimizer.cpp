@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <components/expressions/compare_expression.hpp>
+#include <components/expressions/function_expression.hpp>
 #include <components/expressions/scalar_expression.hpp>
 #include <components/logical_plan/node_aggregate.hpp>
 #include <components/logical_plan/node_catalog_resolve_table.hpp>
@@ -44,9 +45,11 @@ static key make_resolved_key(std::pmr::memory_resource* r, const char* name, sid
     return result;
 }
 
-static resolved_table_metadata_t make_resolved_table_metadata(size_t column_count) {
+static resolved_table_metadata_t make_resolved_table_metadata(size_t column_count,
+                                                              components::catalog::oid_t table_oid =
+                                                                  components::catalog::oid_t{9001}) {
     resolved_table_metadata_t md;
-    md.table_oid = components::catalog::oid_t{9001};
+    md.table_oid = table_oid;
     md.namespace_oid = components::catalog::oid_t{9000};
     md.name = collection_name;
     for (size_t i = 0; i < column_count; ++i) {
@@ -59,7 +62,8 @@ static resolved_table_metadata_t make_resolved_table_metadata(size_t column_coun
     return md;
 }
 
-static node_aggregate_ptr make_prunable_aggregate_plan(std::pmr::memory_resource* r) {
+static node_aggregate_ptr make_aggregate_with_match_expr(std::pmr::memory_resource* r,
+                                                        const expression_ptr& match_expr) {
     auto aggregate = make_node_aggregate(r, core::dbname_t{database_name}, core::relname_t{collection_name});
     aggregate->set_table_oid(components::catalog::oid_t{9001});
 
@@ -67,14 +71,83 @@ static node_aggregate_ptr make_prunable_aggregate_plan(std::pmr::memory_resource
     auto group = make_node_group(r, core::dbname_t{database_name}, core::relname_t{collection_name});
     group->append_expression(projection);
 
+    aggregate->append_child(group);
+    aggregate->append_child(make_node_match(r, core::dbname_t{database_name}, core::relname_t{collection_name}, match_expr));
+    return aggregate;
+}
+
+static node_aggregate_ptr make_prunable_aggregate_plan(std::pmr::memory_resource* r) {
     auto pid_params = make_parameter_node(r);
     auto pid = pid_params->add_parameter(int64_t(10));
     auto predicate = make_compare_expression(r, compare_type::gt, make_resolved_key(r, "c2", side_t::left, 2), pid);
-    auto match = make_node_match(r, core::dbname_t{database_name}, core::relname_t{collection_name}, predicate);
+    return make_aggregate_with_match_expr(r, predicate);
+}
 
-    aggregate->append_child(group);
-    aggregate->append_child(match);
-    return aggregate;
+
+struct filter_pushdown_plan_t {
+    node_sequence_ptr sequence;
+    node_aggregate_ptr parent;
+    node_aggregate_ptr left;
+    node_aggregate_ptr right;
+    node_join_ptr join;
+};
+
+static node_ptr find_child_of_type(const node_ptr& node, node_type type) {
+    for (const auto& child : node->children()) {
+        if (child && child->type() == type) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
+static node_ptr find_match_child(const node_ptr& node) { return find_child_of_type(node, node_type::match_t); }
+
+static filter_pushdown_plan_t make_filter_pushdown_plan(std::pmr::memory_resource* r,
+                                                        join_type type,
+                                                        const expression_ptr& predicate,
+                                                        const expression_ptr& existing_left_predicate = nullptr) {
+    constexpr components::catalog::oid_t left_oid{9101};
+    constexpr components::catalog::oid_t right_oid{9102};
+
+    auto left_resolve = make_node_catalog_resolve_table(r, core::dbname_t{database_name}, core::relname_t{"left"});
+    left_resolve->set_resolved_metadata(make_resolved_table_metadata(3, left_oid));
+    auto right_resolve = make_node_catalog_resolve_table(r, core::dbname_t{database_name}, core::relname_t{"right"});
+    right_resolve->set_resolved_metadata(make_resolved_table_metadata(2, right_oid));
+
+    auto left = make_node_aggregate(r, core::dbname_t{database_name}, core::relname_t{"left"});
+    left->set_table_oid(left_oid);
+    if (existing_left_predicate) {
+        auto left_match = make_node_match(r, core::dbname_t{database_name}, core::relname_t{"left"}, existing_left_predicate);
+        left_match->set_table_oid(left_oid);
+        left->append_child(left_match);
+    }
+
+    auto right = make_node_aggregate(r, core::dbname_t{database_name}, core::relname_t{"right"});
+    right->set_table_oid(right_oid);
+
+    auto join = make_node_join(r, core::dbname_t{database_name}, core::relname_t{}, type);
+    join->append_child(left);
+    join->append_child(right);
+
+    auto parent = make_node_aggregate(r, core::dbname_t{database_name}, core::relname_t{});
+    parent->append_child(join);
+    auto parent_match = make_node_match(r, core::dbname_t{database_name}, core::relname_t{}, predicate);
+    parent->append_child(parent_match);
+
+    node_sequence_ptr sequence{new node_sequence_t(r)};
+    sequence->append_child(left_resolve);
+    sequence->append_child(right_resolve);
+    sequence->append_child(parent);
+
+    return {sequence, parent, left, right, join};
+}
+
+static compare_expression_ptr require_single_compare(const node_ptr& match) {
+    REQUIRE(match);
+    REQUIRE(match->expressions().size() == 1);
+    REQUIRE(match->expressions()[0]->group() == expression_group::compare);
+    return reinterpret_cast<const compare_expression_ptr&>(match->expressions()[0]);
 }
 
 // ================================================================
@@ -172,23 +245,203 @@ TEST_CASE("optimizer_pipeline::post_validate_can_disable_hash_join_rewrite") {
     REQUIRE(result->type() == node_type::join_t);
 }
 
+
 // ================================================================
-// Pipeline: column pruning remains disabled by default
+// Pipeline: filter pushdown moves left-only predicates below inner join
 // ================================================================
-TEST_CASE("optimizer_pipeline::post_validate_default_keeps_column_pruning_disabled") {
+TEST_CASE("optimizer_pipeline::filter_pushdown_default_moves_left_only_filter") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(10));
+    auto predicate = make_compare_expression(&resource,
+                                             compare_type::gt,
+                                             make_resolved_key(&resource, "l1", side_t::left, 1),
+                                             pid);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, predicate);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE_FALSE(find_match_child(plan.parent));
+    auto left_match = find_match_child(plan.left);
+    auto left_predicate = require_single_compare(left_match);
+    REQUIRE(std::get<key>(left_predicate->left()).side() == side_t::undefined);
+    REQUIRE(std::get<key>(left_predicate->left()).path()[0] == 1);
+    REQUIRE_FALSE(find_match_child(plan.right));
+}
+
+// ================================================================
+// Pipeline: filter pushdown remaps right-side joined column indices
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_default_moves_right_only_filter_with_remap") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(20));
+    auto predicate = make_compare_expression(&resource,
+                                             compare_type::lt,
+                                             make_resolved_key(&resource, "r1", side_t::right, 4),
+                                             pid);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, predicate);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE_FALSE(find_match_child(plan.parent));
+    auto right_match = find_match_child(plan.right);
+    auto right_predicate = require_single_compare(right_match);
+    const auto& remapped_key = std::get<key>(right_predicate->left());
+    REQUIRE(remapped_key.side() == side_t::undefined);
+    REQUIRE(remapped_key.path()[0] == 1);
+    REQUIRE_FALSE(find_match_child(plan.left));
+}
+
+// ================================================================
+// Pipeline: mixed-side predicates remain above join
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_keeps_mixed_side_filter_above_join") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto predicate = make_compare_expression(&resource,
+                                             compare_type::eq,
+                                             make_resolved_key(&resource, "l0", side_t::left, 0),
+                                             make_resolved_key(&resource, "r0", side_t::right, 3));
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, predicate);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(find_match_child(plan.parent));
+    REQUIRE_FALSE(find_match_child(plan.left));
+    REQUIRE_FALSE(find_match_child(plan.right));
+}
+
+// ================================================================
+// Pipeline: OR and function predicates remain above join
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_keeps_unsupported_filter_above_join") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid0 = params->add_parameter(int64_t(10));
+    auto pid1 = params->add_parameter(int64_t(20));
+    auto left = make_compare_expression(&resource, compare_type::gt, make_resolved_key(&resource, "l1", side_t::left, 1), pid0);
+    auto right = make_compare_expression(&resource, compare_type::lt, make_resolved_key(&resource, "l2", side_t::left, 2), pid1);
+    auto predicate = make_compare_union_expression(&resource, compare_type::union_or);
+    predicate->append_child(left);
+    predicate->append_child(right);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, predicate);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(find_match_child(plan.parent));
+    REQUIRE_FALSE(find_match_child(plan.left));
+    REQUIRE_FALSE(find_match_child(plan.right));
+}
+
+// ================================================================
+// Pipeline: filter pushdown can be disabled
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_can_be_disabled") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(10));
+    auto predicate = make_compare_expression(&resource,
+                                             compare_type::gt,
+                                             make_resolved_key(&resource, "l1", side_t::left, 1),
+                                             pid);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, predicate);
+
+    components::planner::optimizer_options_t options;
+    options.enable_filter_pushdown = false;
+    components::planner::optimizer_context_t context{&resource, nullptr, options};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(find_match_child(plan.parent));
+    REQUIRE_FALSE(find_match_child(plan.left));
+    REQUIRE_FALSE(find_match_child(plan.right));
+}
+
+// ================================================================
+// Pipeline: pushed predicates merge with an existing child match
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_merges_existing_child_match") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto existing_pid = params->add_parameter(int64_t(1));
+    auto pushed_pid = params->add_parameter(int64_t(10));
+    auto existing = make_compare_expression(&resource,
+                                            compare_type::gte,
+                                            make_resolved_key(&resource, "l0", side_t::undefined, 0),
+                                            existing_pid);
+    auto pushed = make_compare_expression(&resource,
+                                          compare_type::gt,
+                                          make_resolved_key(&resource, "l1", side_t::left, 1),
+                                          pushed_pid);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::inner, pushed, existing);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE_FALSE(find_match_child(plan.parent));
+    auto left_match = find_match_child(plan.left);
+    auto merged = require_single_compare(left_match);
+    REQUIRE(merged->type() == compare_type::union_and);
+    REQUIRE(merged->children().size() == 2);
+}
+
+// ================================================================
+// Pipeline: outer joins are not changed by filter pushdown
+// ================================================================
+TEST_CASE("optimizer_pipeline::filter_pushdown_skips_outer_joins") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(10));
+    auto predicate = make_compare_expression(&resource,
+                                             compare_type::gt,
+                                             make_resolved_key(&resource, "l1", side_t::left, 1),
+                                             pid);
+    auto plan = make_filter_pushdown_plan(&resource, join_type::left, predicate);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(find_match_child(plan.parent));
+    REQUIRE_FALSE(find_match_child(plan.left));
+    REQUIRE_FALSE(find_match_child(plan.right));
+}
+
+// ================================================================
+// Pipeline: column pruning is enabled by default
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_default_enables_column_pruning") {
     auto resource = std::pmr::synchronized_pool_resource();
     auto aggregate = make_prunable_aggregate_plan(&resource);
 
     components::planner::optimizer_context_t context{&resource, nullptr, {}};
     components::planner::optimizer_pipeline_t(context).run_post_validate(aggregate);
 
+    const std::vector<size_t> expected{1, 2};
+    REQUIRE(aggregate->projected_cols() == expected);
+}
+
+// ================================================================
+// Pipeline: column pruning can still be disabled explicitly
+// ================================================================
+TEST_CASE("optimizer_pipeline::post_validate_can_disable_column_pruning") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto aggregate = make_prunable_aggregate_plan(&resource);
+
+    components::planner::optimizer_options_t options;
+    options.enable_column_pruning = false;
+    components::planner::optimizer_context_t context{&resource, nullptr, options};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(aggregate);
+
     REQUIRE(aggregate->projected_cols().empty());
 }
 
 // ================================================================
-// Pipeline: column pruning can be enabled explicitly
+// Pipeline: WHERE on a non-selected column adds it to projected_cols
 // ================================================================
-TEST_CASE("optimizer_pipeline::post_validate_can_enable_column_pruning") {
+TEST_CASE("optimizer_pipeline::column_pruning_where_adds_non_selected_column") {
     auto resource = std::pmr::synchronized_pool_resource();
     auto aggregate = make_prunable_aggregate_plan(&resource);
     auto resolve =
@@ -199,13 +452,27 @@ TEST_CASE("optimizer_pipeline::post_validate_can_enable_column_pruning") {
     sequence->append_child(resolve);
     sequence->append_child(aggregate);
 
-    components::planner::optimizer_options_t options;
-    options.enable_column_pruning = true;
-    components::planner::optimizer_context_t context{&resource, nullptr, options};
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
     components::planner::optimizer_pipeline_t(context).run_post_validate(sequence);
 
     const std::vector<size_t> expected{1, 2};
     REQUIRE(aggregate->projected_cols() == expected);
+}
+
+// ================================================================
+// Pipeline: unsupported match expressions keep read-all-columns fallback
+// ================================================================
+TEST_CASE("optimizer_pipeline::column_pruning_unsupported_match_expression_falls_back") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    std::pmr::vector<param_storage> args{&resource};
+    args.emplace_back(make_resolved_key(&resource, "c2", side_t::left, 2));
+    auto function_expr = make_function_expression(&resource, std::string{"unknown_predicate"}, std::move(args));
+    auto aggregate = make_aggregate_with_match_expr(&resource, function_expr);
+
+    components::planner::optimizer_context_t context{&resource, nullptr, {}};
+    components::planner::optimizer_pipeline_t(context).run_post_validate(aggregate);
+
+    REQUIRE(aggregate->projected_cols().empty());
 }
 
 // ================================================================

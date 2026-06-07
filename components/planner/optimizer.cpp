@@ -2,6 +2,7 @@
 
 #include "optimizer/rules/column_pruning.hpp"
 #include "optimizer/rules/constant_folding.hpp"
+#include "optimizer/rules/filter_pushdown.hpp"
 #include "optimizer/rules/hash_join.hpp"
 
 #include <utility>
@@ -28,6 +29,13 @@ namespace components::planner {
             return nullptr;
         }
 
+        if (context_.options.enable_filter_pushdown) {
+            optimizer::pushdown_filters(node);
+        }
+
+        // Column pruning is a default post-validate RBO rule. If it cannot
+        // prove a projection is safe, it leaves projected_cols empty and scans
+        // keep the existing read-all-columns behavior.
         if (context_.options.enable_column_pruning) {
             optimizer::prune_columns(node);
         }

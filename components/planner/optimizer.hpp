@@ -9,8 +9,9 @@ namespace components::planner {
 
     struct optimizer_options_t {
         bool enable_constant_folding{true};
+        bool enable_filter_pushdown{true};
         bool enable_hash_join_rewrite{true};
-        bool enable_column_pruning{false};
+        bool enable_column_pruning{true};
     };
 
     struct optimizer_context_t {
@@ -41,8 +42,11 @@ namespace components::planner {
     // Late optimization pass. Runs AFTER validate_schema +
     // stamp_oids_from_resolves, so node->table_oid() is populated and
     // sibling catalog_resolve_table_t nodes carry resolved_metadata().
-    // Schema-aware rules go here.
-    //   - column_pruning (annotates node_aggregate_t with projected_cols)
+    // Schema-aware RBO rules go here.
+    //   - filter_pushdown (moves safe single-side predicates below inner/cross joins)
+    //   - column_pruning (annotates node_aggregate_t with projected_cols;
+    //     empty projected_cols remains the read-all-columns fallback)
+    //   - hash_join_rewrite
     //
     // Schema info is read from the plan tree itself (sibling resolves);
     // the optimizer is self-contained and needs no external catalog handle.

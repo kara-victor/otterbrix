@@ -3377,6 +3377,16 @@ TEST_CASE("integration::cpp::test_sql_features::comma_join") {
         REQUIRE(cur->is_success());
         REQUIRE(cur->size() == 3);
     }
+
+
+    INFO("comma-join keeps residual join predicate while pushing single-side filter") {
+        auto session = otterbrix::session_id_t();
+        auto cur = dispatcher->execute_sql(session,
+                                           "SELECT * FROM TestDatabase.orders, TestDatabase.customers "
+                                           "WHERE orders.customer_id = customers.id AND orders.id > 1;");
+        REQUIRE(cur->is_success());
+        REQUIRE(cur->size() == 2);
+    }
 }
 
 // CREATE VIEW e2e — verifies SELECT * FROM v expands through the pipeline.
