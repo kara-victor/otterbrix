@@ -1,6 +1,6 @@
 #include "create_plan_match.hpp"
 
-#include "index_selection_helpers.hpp"
+#include "scan_selection.hpp"
 
 #include <components/catalog/catalog_codes.hpp>
 #include <components/expressions/compare_expression.hpp>
@@ -17,61 +17,6 @@ namespace services::planner::impl {
     namespace {
 
         namespace expr = components::expressions;
-
-        bool is_range_compare(expr::compare_type type) {
-            return type == expr::compare_type::lt || type == expr::compare_type::lte ||
-                   type == expr::compare_type::gt || type == expr::compare_type::gte;
-        }
-
-        // Check if this compare expression can use an index scan
-        [[maybe_unused]] bool
-        can_use_index(const context_storage_t& context, const expr::compare_expression_t& comp, bool& key_on_left) {
-            // Skip union conditions
-            if (expr::is_union_compare_condition(comp.type())) {
-                return false;
-            }
-            // Only simple comparisons (not regex, any, all, etc.)
-            switch (comp.type()) {
-                case expr::compare_type::eq:
-                case expr::compare_type::lt:
-                case expr::compare_type::lte:
-                case expr::compare_type::gt:
-                case expr::compare_type::gte:
-                    break;
-                default:
-                    return false;
-            }
-            // Need parameters to resolve the value
-            if (!context.parameters) {
-                return false;
-            }
-
-            // Check key_t on left, parameter_id_t on right
-            if (std::holds_alternative<expr::key_t>(comp.left()) &&
-                std::holds_alternative<core::parameter_id_t>(comp.right())) {
-                const auto& key = std::get<expr::key_t>(comp.left());
-                const bool range = is_range_compare(comp.type());
-                if (context.has_index_on(key) &&
-                    (!range ||
-                     context.has_index_on_with_other_type(key, components::logical_plan::index_type::hashed))) {
-                    key_on_left = true;
-                    return true;
-                }
-            }
-            // Check key_t on right, parameter_id_t on left (symmetric)
-            if (std::holds_alternative<core::parameter_id_t>(comp.left()) &&
-                std::holds_alternative<expr::key_t>(comp.right())) {
-                const auto& key = std::get<expr::key_t>(comp.right());
-                const bool range = is_range_compare(comp.type());
-                if (context.has_index_on(key) &&
-                    (!range ||
-                     context.has_index_on_with_other_type(key, components::logical_plan::index_type::hashed))) {
-                    key_on_left = false;
-                    return true;
-                }
-            }
-            return false;
-        }
 
         bool is_pure_compare(const components::expressions::expression_ptr& expr) {
             using namespace components::expressions;
@@ -104,26 +49,21 @@ namespace services::planner::impl {
                 // TODO: function_expr in scans
                 if (is_pure_compare(expr)) {
                     auto comp_expr = reinterpret_cast<const expr::compare_expression_ptr&>(expr);
-                    // Index selection: detect if an index is available for this predicate.
-                    if (!comp_expr->is_union()) {
-                        bool key_on_left = true;
-                        if (can_use_index(context, *comp_expr, key_on_left)) {
-                            auto& key = key_on_left ? std::get<expr::key_t>(comp_expr->left())
-                                                    : std::get<expr::key_t>(comp_expr->right());
-                            auto param_id = key_on_left ? std::get<core::parameter_id_t>(comp_expr->right())
-                                                        : std::get<core::parameter_id_t>(comp_expr->left());
-                            auto& value = get_parameter(context.parameters, param_id);
-                            auto ctype = key_on_left ? comp_expr->type() : mirror_compare(comp_expr->type());
-                            auto preferred_index_type = context.preferred_index_type_for_compare(key, ctype);
-                            return boost::intrusive_ptr(new components::operators::index_scan(context.resource,
-                                                                                              context.log.clone(),
-                                                                                              table_oid,
-                                                                                              key,
-                                                                                              value,
-                                                                                              ctype,
-                                                                                              preferred_index_type,
-                                                                                              limit));
-                        }
+                    const auto candidate = select_scan_access_path(context, table_oid, *comp_expr);
+                    if (candidate.selection.access_path == components::planner::scan_access_path_t::index_scan) {
+                        const auto& key = candidate.key_on_left ? std::get<expr::key_t>(comp_expr->left())
+                                                                : std::get<expr::key_t>(comp_expr->right());
+                        const auto param_id = candidate.key_on_left ? std::get<core::parameter_id_t>(comp_expr->right())
+                                                                    : std::get<core::parameter_id_t>(comp_expr->left());
+                        const auto& value = get_parameter(context.parameters, param_id);
+                        return boost::intrusive_ptr(new components::operators::index_scan(context.resource,
+                                                                                          context.log.clone(),
+                                                                                          table_oid,
+                                                                                          key,
+                                                                                          value,
+                                                                                          candidate.compare_type,
+                                                                                          candidate.index_type,
+                                                                                          limit));
                     }
 
                     return boost::intrusive_ptr(new components::operators::full_scan(context.resource,

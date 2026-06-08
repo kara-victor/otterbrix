@@ -20,6 +20,7 @@
 #include <components/physical_plan/operators/scan/index_scan.hpp>
 #include <components/physical_plan_generator/impl/create_plan_match.hpp>
 #include <components/physical_plan_generator/impl/index_selection_helpers.hpp>
+#include <components/physical_plan_generator/impl/scan_selection.hpp>
 #include <components/planner/optimizer.hpp>
 #include <services/collection/context_storage.hpp>
 
@@ -1462,5 +1463,179 @@ TEST_CASE("create_plan_match::union_compare_uses_full_scan") {
     auto op = services::planner::impl::create_plan_match(ctx, node, components::logical_plan::limit_t::unlimit());
     REQUIRE(op->type() == components::operators::operator_type::match);
     REQUIRE(op->left() != nullptr);
+    REQUIRE(op->left()->type() == components::operators::operator_type::full_scan);
+}
+
+
+static components::expressions::compare_expression_ptr as_compare(const expression_ptr& expr) {
+    return reinterpret_cast<const components::expressions::compare_expression_ptr&>(expr);
+}
+
+static void set_row_count(services::context_storage_t& ctx,
+                          components::catalog::oid_t table_oid,
+                          std::uint64_t row_count) {
+    components::planner::table_statistics_t stats;
+    stats.row_count = row_count;
+    ctx.table_statistics[table_oid] = std::move(stats);
+}
+
+TEST_CASE("scan_selection::small_table_prefers_full_scan") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{790};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 5);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::full_scan);
+    REQUIRE(result.selection.full_scan_cost < result.selection.index_scan_cost);
+}
+
+TEST_CASE("create_plan_match::small_table_cbo_uses_full_scan") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{799};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 5);
+
+    auto node = make_node_match(&resource,
+                                core::dbname_t{database_name},
+                                core::relname_t{collection_name},
+                                make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    node->set_table_oid(table_oid);
+
+    auto op = services::planner::impl::create_plan_match(ctx, node, components::logical_plan::limit_t::unlimit());
+    REQUIRE(op->type() == components::operators::operator_type::full_scan);
+}
+
+TEST_CASE("scan_selection::large_equality_prefers_hashed_index") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{791};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 10000);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+    REQUIRE(result.index_type == components::logical_plan::index_type::hashed);
+    REQUIRE(result.selection.index_scan_cost < result.selection.full_scan_cost);
+}
+
+TEST_CASE("scan_selection::large_range_prefers_single_index") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{792};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::single);
+    set_row_count(ctx, table_oid, 10000);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::gte, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+    REQUIRE(result.index_type == components::logical_plan::index_type::single);
+}
+
+TEST_CASE("scan_selection::range_with_hashed_index_uses_full_scan") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{793};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 10000);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::gt, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::full_scan);
+    REQUIRE(result.index_type == components::logical_plan::index_type::no_valid);
+}
+
+TEST_CASE("scan_selection::unknown_statistics_preserve_index_first_fallback") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{794};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+}
+
+TEST_CASE("scan_selection::disabled_cbo_preserves_index_first_fallback") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{795};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 1);
+    ctx.enable_cbo_scan_selection = false;
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+}
+
+TEST_CASE("scan_selection::key_on_right_mirrors_compare") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{796};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::single);
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::lt, pid, key(&resource, "age")));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+    REQUIRE_FALSE(result.key_on_left);
+    REQUIRE(result.compare_type == compare_type::gt);
+}
+
+TEST_CASE("scan_selection::union_predicate_uses_full_scan") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{797};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 10000);
+
+    auto predicate = make_compare_union_expression(&resource, compare_type::union_and);
+    predicate->append_child(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::full_scan);
+}
+
+TEST_CASE("create_plan_match::function_predicate_uses_match_over_full_scan") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    constexpr auto table_oid = components::catalog::oid_t{798};
+    auto ctx = make_context_with_oid(&resource, table_oid, static_cast<const storage_parameters*>(nullptr));
+    std::pmr::vector<param_storage> args{&resource};
+    args.emplace_back(key(&resource, "age"));
+    auto function = make_function_expression(&resource, std::string{"unknown_predicate"}, std::move(args));
+    auto node = make_node_match(&resource, core::dbname_t{database_name}, core::relname_t{collection_name}, function);
+    node->set_table_oid(table_oid);
+
+    auto op = services::planner::impl::create_plan_match(ctx, node, components::logical_plan::limit_t::unlimit());
+    REQUIRE(op->type() == components::operators::operator_type::match);
     REQUIRE(op->left()->type() == components::operators::operator_type::full_scan);
 }

@@ -8,9 +8,8 @@
 //   DELETE  — referencing FKs (for CASCADE / SET NULL / SET DEFAULT)
 //   CREATE  — namespace_oid (for catalog registration)
 //
-// No disk I/O of its own — all catalog data comes from the plan-tree idx, so
-// all catalog metadata comes from the resolve idx materialized in-plan by
-// Pass 1.
+// Catalog metadata comes from the plan-tree resolve idx. The top-level pass also
+// gathers lightweight row-count statistics from disk for CBO scan selection.
 
 #include "enrich_logical_plan.hpp"
 
@@ -53,6 +52,7 @@
 #include <components/logical_plan/node_refresh_matview.hpp>
 #include <components/logical_plan/node_sort.hpp>
 #include <components/logical_plan/node_update.hpp>
+#include <services/disk/manager_disk.hpp>
 #include <services/index/manager_index.hpp>
 
 #include <limits>
@@ -655,6 +655,18 @@ namespace services::dispatcher {
                                          ctx.session,
                                          tbl_oid);
                     collections_ctx->indexed_descriptions = co_await std::move(idf);
+                }
+            }
+            if (collections_ctx && disk_address != actor_zeta::address_t::empty_address()) {
+                for (auto tbl_oid : root->table_oid_dependencies()) {
+                    if (tbl_oid == components::catalog::INVALID_OID) {
+                        continue;
+                    }
+                    auto [_rows, rows_future] =
+                        actor_zeta::send(disk_address, &disk::manager_disk_t::storage_total_rows, ctx.session, tbl_oid);
+                    components::planner::table_statistics_t stats;
+                    stats.row_count = co_await std::move(rows_future);
+                    collections_ctx->table_statistics[tbl_oid] = std::move(stats);
                 }
             }
             co_return;

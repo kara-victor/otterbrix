@@ -7,6 +7,7 @@
 #include <components/logical_plan/node_catalog_resolve_table.hpp>
 #include <components/expressions/compare_expression.hpp>
 #include <components/logical_plan/param_storage.hpp>
+#include <components/planner/cost_model.hpp>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -29,6 +30,8 @@ namespace services {
         // column names + relkind.
         std::unordered_map<components::catalog::oid_t, const components::logical_plan::resolved_table_metadata_t*>
             table_metadata;
+        std::unordered_map<components::catalog::oid_t, components::planner::table_statistics_t> table_statistics;
+        bool enable_cbo_scan_selection{true};
 
         context_storage_t(std::pmr::memory_resource* resource,
                           log_t log,
@@ -47,6 +50,12 @@ namespace services {
         table_metadata_for(components::catalog::oid_t oid) const noexcept {
             auto it = table_metadata.find(oid);
             return it != table_metadata.end() ? it->second : nullptr;
+        }
+
+        const components::planner::table_statistics_t*
+        table_statistics_for(components::catalog::oid_t oid) const noexcept {
+            auto it = table_statistics.find(oid);
+            return it != table_statistics.end() ? &it->second : nullptr;
         }
 
         bool has_index_on(const components::expressions::key_t& key) const {
