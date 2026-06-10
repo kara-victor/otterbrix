@@ -4,6 +4,7 @@
 
 #include <components/logical_plan/node.hpp>
 #include <components/logical_plan/param_storage.hpp>
+#include <components/planner/cost_model.hpp>
 
 namespace components::planner {
 
@@ -12,12 +13,16 @@ namespace components::planner {
         bool enable_filter_pushdown{true};
         bool enable_hash_join_rewrite{true};
         bool enable_column_pruning{true};
+        bool enable_cbo_join_ordering{true};
     };
 
     struct optimizer_context_t {
         std::pmr::memory_resource* resource{nullptr};
         logical_plan::parameter_node_t* parameters{nullptr};
         optimizer_options_t options{};
+        const table_statistics_map_t* table_statistics{nullptr};
+        join_cost_model_t join_cost_model{};
+        const logical_plan::optimizer_hints_t* hints{nullptr};
     };
 
     class optimizer_pipeline_t {
@@ -44,6 +49,7 @@ namespace components::planner {
     // sibling catalog_resolve_table_t nodes carry resolved_metadata().
     // Schema-aware RBO rules go here.
     //   - filter_pushdown (moves safe single-side predicates below inner/cross joins)
+    //   - CBO join ordering (only when table statistics are supplied)
     //   - column_pruning (annotates node_aggregate_t with projected_cols;
     //     empty projected_cols remains the read-all-columns fallback)
     //   - hash_join_rewrite
@@ -51,5 +57,12 @@ namespace components::planner {
     // Schema info is read from the plan tree itself (sibling resolves);
     // the optimizer is self-contained and needs no external catalog handle.
     logical_plan::node_ptr post_validate_optimize(std::pmr::memory_resource* resource, logical_plan::node_ptr node);
+    logical_plan::node_ptr post_validate_optimize(std::pmr::memory_resource* resource,
+                                                  logical_plan::node_ptr node,
+                                                  const table_statistics_map_t* table_statistics);
+    logical_plan::node_ptr post_validate_optimize(std::pmr::memory_resource* resource,
+                                                  logical_plan::node_ptr node,
+                                                  const table_statistics_map_t* table_statistics,
+                                                  const logical_plan::optimizer_hints_t* hints);
 
 } // namespace components::planner

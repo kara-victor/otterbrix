@@ -61,8 +61,17 @@ namespace services::planner::impl {
             return result;
         }
 
+        const auto forced = context.scan_hint_for(table_oid);
+        if (forced && *forced == lp::scan_hint_t::full_scan) {
+            return result;
+        }
+
         result.index_type = compatible_index_type(context, *key, result.compare_type);
         if (result.index_type == lp::index_type::no_valid) {
+            return result;
+        }
+        if (forced && *forced == lp::scan_hint_t::index_scan) {
+            result.selection.access_path = cbo::scan_access_path_t::index_scan;
             return result;
         }
 

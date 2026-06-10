@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 #include <components/logical_plan/param_storage.hpp>
 #include <components/sql/parser/parser.h>
+#include <components/sql/transformer/hint_parser.hpp>
 #include <components/sql/transformer/transformer.hpp>
 #include <components/sql/transformer/utils.hpp>
 
@@ -299,4 +300,47 @@ TEST_CASE("components::sql::select_from_fields") {
         R"_($aggregate: {$select: {number, size: {$constant: #0}, title: {$constant: #1}, )_"
         R"_(on: {$constant: #2}, off: {$constant: #3}}})_",
         vec({v(&resource, 10l), v(&resource, "title"), v(&resource, true), v(&resource, false)}));
+}
+
+TEST_CASE("components::sql::optimizer_hints") {
+    using components::logical_plan::scan_hint_t;
+
+    SECTION("parses supported hints") {
+        auto hints = parse_optimizer_hints(
+            "SELECT /*+ no_cbo LEADING(a, b c) FULL_SCAN(a) INDEX_SCAN(b) */ a.id FROM t a;");
+        REQUIRE(hints.disable_cbo);
+        REQUIRE(hints.leading_order == std::vector<std::string>{"a", "b", "c"});
+        REQUIRE(hints.scan_preferences.at("a") == scan_hint_t::full_scan);
+        REQUIRE(hints.scan_preferences.at("b") == scan_hint_t::index_scan);
+    }
+
+    SECTION("ordinary comments and unknown hints are ignored") {
+        REQUIRE(parse_optimizer_hints("SELECT /* ordinary */ * FROM t;").empty());
+        REQUIRE(parse_optimizer_hints("SELECT /*+ UNKNOWN(a) */ * FROM t;").empty());
+        REQUIRE(parse_optimizer_hints("SELECT /*+ NO_CBO(unexpected) */ * FROM t;").empty());
+        REQUIRE(parse_optimizer_hints("SELECT * FROM t /*+ NO_CBO */;").empty());
+    }
+
+    SECTION("conflicting scan hints cancel each other") {
+        auto hints = parse_optimizer_hints("SELECT /*+ FULL_SCAN(a) INDEX_SCAN(a) FULL_SCAN(a) */ * FROM t a;");
+        REQUIRE(hints.scan_preferences.empty());
+    }
+
+    SECTION("duplicate leading alias invalidates leading hint") {
+        auto hints = parse_optimizer_hints("SELECT /*+ LEADING(a b a) */ * FROM a;");
+        REQUIRE_FALSE(hints.leading_order.has_value());
+    }
+}
+
+TEST_CASE("components::sql::optimizer_hints_are_attached_to_top_level_select") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    std::pmr::monotonic_buffer_resource arena_resource(&resource);
+    const char* query = "SELECT /*+ NO_CBO FULL_SCAN(t) */ * FROM TestDatabase.TestCollection t;";
+    auto select = linitial(raw_parser(&arena_resource, query));
+    transform::transformer transformer(&resource, query);
+    auto wrapped = transformer.transform(pg_cell_to_node_cast(select)).finalize();
+    REQUIRE_FALSE(wrapped.has_error());
+    const auto& hints = wrapped.value().node->optimizer_hints();
+    REQUIRE(hints.disable_cbo);
+    REQUIRE(hints.scan_preferences.at("t") == components::logical_plan::scan_hint_t::full_scan);
 }

@@ -1,12 +1,14 @@
 #pragma once
 
 #include "forward.hpp"
+#include "optimizer_hints.hpp"
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 #include <components/base/collection_full_name.hpp>
 #include <components/catalog/catalog_oids.hpp>
 #include <components/expressions/expression.hpp>
+#include <memory>
 #include <memory_resource>
 #include <unordered_set>
 
@@ -70,6 +72,14 @@ namespace components::logical_plan {
         std::string to_string() const;
         std::pmr::memory_resource* resource() const noexcept;
 
+        const optimizer_hints_t& optimizer_hints() const noexcept {
+            static const optimizer_hints_t empty_hints;
+            return optimizer_hints_ ? *optimizer_hints_ : empty_hints;
+        }
+        void set_optimizer_hints(optimizer_hints_t hints) {
+            optimizer_hints_ = hints.empty() ? nullptr : std::make_shared<const optimizer_hints_t>(std::move(hints));
+        }
+
     protected:
         const node_type type_;
         std::string result_alias_;
@@ -78,6 +88,7 @@ namespace components::logical_plan {
         // See table_oid()/set_table_oid() above. Default INVALID_OID; enrich
         // is responsible for stamping the resolved oid before plan execution.
         components::catalog::oid_t table_oid_{components::catalog::INVALID_OID};
+        std::shared_ptr<const optimizer_hints_t> optimizer_hints_;
 
         void table_oid_dependencies_(std::unordered_set<components::catalog::oid_t>& upper_dependencies);
 

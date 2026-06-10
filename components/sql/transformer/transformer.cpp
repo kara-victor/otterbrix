@@ -1,4 +1,5 @@
 #include "transformer.hpp"
+#include "hint_parser.hpp"
 #include "utils.hpp"
 
 #include <components/logical_plan/node_aggregate.hpp>
@@ -150,6 +151,9 @@ namespace components::sql::transform {
         if (has_error()) {
             return {resource_, std::move(error_)};
         } else {
+            if (node.type == T_SelectStmt && log_node && raw_sql_) {
+                log_node->set_optimizer_hints(parse_optimizer_hints(raw_sql_));
+            }
             return {resource_,
                     std::move(log_node),
                     std::move(params),

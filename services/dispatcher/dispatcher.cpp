@@ -92,6 +92,33 @@ namespace services::dispatcher {
 
     namespace {
 
+        void apply_scan_hints(const node_ptr& root,
+                              const optimizer_hints_t& hints,
+                              context_storage_t& context) {
+            if (!root || hints.scan_preferences.empty()) {
+                return;
+            }
+            std::vector<node_ptr> stack{root};
+            while (!stack.empty()) {
+                auto node = std::move(stack.back());
+                stack.pop_back();
+                if (node->type() == node_type::aggregate_t && node->table_oid() != catalog::INVALID_OID) {
+                    const auto* aggregate = static_cast<const node_aggregate_t*>(node.get());
+                    const auto& alias = node->result_alias().empty()
+                                            ? static_cast<const std::string&>(aggregate->relname())
+                                            : node->result_alias();
+                    if (auto it = hints.scan_preferences.find(alias); it != hints.scan_preferences.end()) {
+                        context.scan_hints[node->table_oid()] = it->second;
+                    }
+                }
+                for (const auto& child : node->children()) {
+                    if (child) {
+                        stack.push_back(child);
+                    }
+                }
+            }
+        }
+
         // Probe `name` in the plan-tree idx across the dbname search path.
         // The transformer emits resolve_type for every (dbname, name) tuple
         // we expect to find here (CREATE TABLE column UDT, CREATE TYPE
@@ -484,6 +511,7 @@ namespace services::dispatcher {
             drop_target_collection = qualified_name_t{names.first, names.second};
         }
         auto logic_plan = std::move(plan);
+        const auto optimizer_hints = logic_plan->optimizer_hints();
         context_storage_t collections_context_storage(resource(), log_.clone(), session_tz(session));
         // Optimizer: constant folding, etc.
         logic_plan = components::planner::optimize(resource(), logic_plan, params.get());
@@ -1155,17 +1183,24 @@ namespace services::dispatcher {
             co_return std::move(error);
         }
 
-        // Late logical optimization. Runs after validate_schema has stamped key
-        // side()/path(), so schema-aware rewrites are safe here. Currently rewrites
-        // eligible nested-loop joins into hash joins (node_join_t -> node_hash_join_t).
-        logic_plan = components::planner::post_validate_optimize(resource(), std::move(logic_plan));
-
-        // Enrich DML node fields with catalog metadata (NOT NULL, DEFAULT, CHECK exprs).
-        // enrich reads exclusively from the plan-tree idx.
+        // Enrich before late optimization so table OIDs, index metadata and
+        // lightweight row-count statistics are available to CBO rules. DML
+        // metadata enrichment remains part of the same pass.
         {
             auto ef = enrich_plan(resource(), logic_plan, disk_address_, ctx, index_address_, &collections_context_storage);
             co_await std::move(ef);
         }
+
+        // Late logical optimization. Runs after validate_schema and enrich, so
+        // schema-aware RBO rules and CBO join ordering have resolved paths/OIDs
+        // plus table cardinalities. Physical hash-join selection remains the
+        // final logical rewrite in this pipeline.
+        collections_context_storage.enable_cbo_scan_selection = !optimizer_hints.disable_cbo;
+        apply_scan_hints(logic_plan, optimizer_hints, collections_context_storage);
+        logic_plan = components::planner::post_validate_optimize(resource(),
+                                                                  std::move(logic_plan),
+                                                                  &collections_context_storage.table_statistics,
+                                                                  &optimizer_hints);
         // Logical plan rewrite: insert constraint wrapper nodes driven by enriched fields.
         {
             components::planner::planner_t planner;

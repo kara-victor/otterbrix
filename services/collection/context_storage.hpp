@@ -8,6 +8,7 @@
 #include <components/expressions/compare_expression.hpp>
 #include <components/logical_plan/param_storage.hpp>
 #include <components/planner/cost_model.hpp>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -30,8 +31,9 @@ namespace services {
         // column names + relkind.
         std::unordered_map<components::catalog::oid_t, const components::logical_plan::resolved_table_metadata_t*>
             table_metadata;
-        std::unordered_map<components::catalog::oid_t, components::planner::table_statistics_t> table_statistics;
+        components::planner::table_statistics_map_t table_statistics;
         bool enable_cbo_scan_selection{true};
+        std::unordered_map<components::catalog::oid_t, components::logical_plan::scan_hint_t> scan_hints;
 
         context_storage_t(std::pmr::memory_resource* resource,
                           log_t log,
@@ -50,6 +52,12 @@ namespace services {
         table_metadata_for(components::catalog::oid_t oid) const noexcept {
             auto it = table_metadata.find(oid);
             return it != table_metadata.end() ? it->second : nullptr;
+        }
+
+        std::optional<components::logical_plan::scan_hint_t>
+        scan_hint_for(components::catalog::oid_t oid) const noexcept {
+            auto it = scan_hints.find(oid);
+            return it != scan_hints.end() ? std::optional{it->second} : std::nullopt;
         }
 
         const components::planner::table_statistics_t*

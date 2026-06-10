@@ -30,6 +30,7 @@ set(SOURCE_${PROJECT_NAME}
     parser/nodes/parsenodes.h
 
     transformer/utils.cpp
+    transformer/hint_parser.cpp
     transformer/transformer.cpp
     transformer/transform_result.cpp
 

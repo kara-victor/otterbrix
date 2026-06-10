@@ -224,3 +224,67 @@ TEST_CASE("integration::cpp::hash_join::correctness") {
         CHECK(run("SELECT * FROM " + db + ".sl INNER JOIN " + db + ".sr ON sl.s = sr.s;")->size() == 2);
     }
 }
+
+
+TEST_CASE("integration::cpp::hash_join::cbo_join_ordering_disk_backed") {
+    auto config = test_create_config("/tmp/test_hash_join/cbo_join_ordering");
+    test_clear_directory(config);
+    config.disk.on = true;
+    config.wal.on = false;
+    test_spaces space(config);
+    auto* dispatcher = space.dispatcher();
+    auto session = otterbrix::session_id_t();
+
+    REQUIRE(dispatcher->execute_sql(session, "CREATE DATABASE cbodb;")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE cbodb.a (id bigint, bid bigint);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE cbodb.b (id bigint, cid bigint, payload string);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE cbodb.c (id bigint, label string);")->is_success());
+
+    REQUIRE(dispatcher->execute_sql(session,
+                                    "INSERT INTO cbodb.a (id, bid) VALUES (1,10),(2,20),(3,30),(4,99);")
+                ->is_success());
+    REQUIRE(dispatcher->execute_sql(session,
+                                    "INSERT INTO cbodb.b (id, cid, payload) VALUES "
+                                    "(10,100,'x'),(20,100,'y'),(30,100,'z');")
+                ->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "INSERT INTO cbodb.c (id, label) VALUES (100,'only');")->is_success());
+
+    auto result = dispatcher->execute_sql(session,
+                                          "SELECT a.id, b.payload, c.label FROM cbodb.a a "
+                                          "INNER JOIN cbodb.b b ON a.bid = b.id "
+                                          "INNER JOIN cbodb.c c ON b.cid = c.id "
+                                          "ORDER BY a.id ASC;");
+    REQUIRE(result->is_success());
+    REQUIRE(result->size() == 3);
+    REQUIRE(result->chunk_data().column_count() == 3);
+    REQUIRE(result->chunk_data().data[0].data<int64_t>()[0] == 1);
+    REQUIRE(result->chunk_data().data[0].data<int64_t>()[1] == 2);
+    REQUIRE(result->chunk_data().data[0].data<int64_t>()[2] == 3);
+}
+
+
+TEST_CASE("integration::cpp::hash_join::optimizer_hints") {
+    auto config = test_create_config("/tmp/test_hash_join/optimizer_hints");
+    test_clear_directory(config);
+    config.disk.on = true;
+    config.wal.on = false;
+    test_spaces space(config);
+    auto* dispatcher = space.dispatcher();
+    auto session = otterbrix::session_id_t();
+
+    REQUIRE(dispatcher->execute_sql(session, "CREATE DATABASE hintdb;")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE hintdb.a (id bigint, bid bigint);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE hintdb.b (id bigint, cid bigint);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "CREATE TABLE hintdb.c (id bigint);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "INSERT INTO hintdb.a (id,bid) VALUES (1,10),(2,20);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "INSERT INTO hintdb.b (id,cid) VALUES (10,100),(20,100);")->is_success());
+    REQUIRE(dispatcher->execute_sql(session, "INSERT INTO hintdb.c (id) VALUES (100);")->is_success());
+
+    auto result = dispatcher->execute_sql(session,
+        "SELECT /*+ NO_CBO LEADING(c b a) FULL_SCAN(a) */ a.id FROM hintdb.a a "
+        "INNER JOIN hintdb.b b ON a.bid=b.id INNER JOIN hintdb.c c ON b.cid=c.id ORDER BY a.id;");
+    REQUIRE(result->is_success());
+    REQUIRE(result->size() == 2);
+    REQUIRE(result->chunk_data().data[0].data<int64_t>()[0] == 1);
+    REQUIRE(result->chunk_data().data[0].data<int64_t>()[1] == 2);
+}

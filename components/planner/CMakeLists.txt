@@ -7,6 +7,7 @@ set(SOURCE_${PROJECT_NAME}
         optimizer/rules/filter_pushdown.cpp
         optimizer/rules/column_pruning.cpp
         optimizer/rules/hash_join.cpp
+        optimizer/rules/join_ordering.cpp
 )
 
 add_library(otterbrix_${PROJECT_NAME}

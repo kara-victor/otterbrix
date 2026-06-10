@@ -1467,6 +1467,266 @@ TEST_CASE("create_plan_match::union_compare_uses_full_scan") {
 }
 
 
+
+struct join_order_plan_t {
+    node_sequence_ptr sequence;
+    node_aggregate_ptr parent;
+    node_aggregate_ptr a;
+    node_aggregate_ptr b;
+    node_aggregate_ptr c;
+};
+
+static key qualified_key(std::pmr::memory_resource* resource,
+                         const char* alias,
+                         const char* column,
+                         side_t side,
+                         size_t path_index) {
+    std::pmr::vector<std::pmr::string> parts{resource};
+    parts.emplace_back(alias);
+    parts.emplace_back(column);
+    key result{std::move(parts), side};
+    std::pmr::vector<size_t> path{resource};
+    path.push_back(path_index);
+    result.set_path(std::move(path));
+    return result;
+}
+
+static node_aggregate_ptr join_leaf(std::pmr::memory_resource* resource,
+                                    const char* alias,
+                                    components::catalog::oid_t oid,
+                                    const expression_ptr& filter = nullptr) {
+    auto leaf = make_node_aggregate(resource, core::dbname_t{database_name}, core::relname_t{alias});
+    leaf->set_result_alias(alias);
+    leaf->set_table_oid(oid);
+    if (filter) {
+        auto match = make_node_match(resource, core::dbname_t{database_name}, core::relname_t{alias}, filter);
+        match->set_table_oid(oid);
+        leaf->append_child(match);
+    }
+    return leaf;
+}
+
+static node_catalog_resolve_table_ptr join_resolve(std::pmr::memory_resource* resource,
+                                                   const char* alias,
+                                                   components::catalog::oid_t oid) {
+    auto resolve = make_node_catalog_resolve_table(resource, core::dbname_t{database_name}, core::relname_t{alias});
+    auto md = make_resolved_table_metadata(2, oid);
+    md.name = alias;
+    resolve->set_resolved_metadata(std::move(md));
+    return resolve;
+}
+
+static join_order_plan_t make_join_order_plan(std::pmr::memory_resource* resource,
+                                              join_type outer_type = join_type::inner,
+                                              const expression_ptr& b_filter = nullptr) {
+    constexpr components::catalog::oid_t a_oid{9201};
+    constexpr components::catalog::oid_t b_oid{9202};
+    constexpr components::catalog::oid_t c_oid{9203};
+    auto a = join_leaf(resource, "a", a_oid);
+    auto b = join_leaf(resource, "b", b_oid, b_filter);
+    auto c = join_leaf(resource, "c", c_oid);
+
+    auto ab = make_node_join(resource, core::dbname_t{}, core::relname_t{}, join_type::inner);
+    ab->append_child(a);
+    ab->append_child(b);
+    ab->append_expression(make_compare_expression(resource,
+                                                  compare_type::eq,
+                                                  qualified_key(resource, "a", "c0", side_t::left, 0),
+                                                  qualified_key(resource, "b", "c0", side_t::right, 0)));
+
+    auto abc = make_node_join(resource, core::dbname_t{}, core::relname_t{}, outer_type);
+    abc->append_child(ab);
+    abc->append_child(c);
+    abc->append_expression(make_compare_expression(resource,
+                                                   compare_type::eq,
+                                                   qualified_key(resource, "b", "c0", side_t::left, 2),
+                                                   qualified_key(resource, "c", "c0", side_t::right, 0)));
+
+    auto parent = make_node_aggregate(resource, core::dbname_t{}, core::relname_t{});
+    parent->append_child(abc);
+    auto group = make_node_group(resource, core::dbname_t{}, core::relname_t{});
+    group->append_expression(make_scalar_expression(resource,
+                                                    scalar_type::get_field,
+                                                    qualified_key(resource, "a", "c0", side_t::left, 0)));
+    parent->append_child(group);
+
+    node_sequence_ptr sequence{new node_sequence_t(resource)};
+    sequence->append_child(join_resolve(resource, "a", a_oid));
+    sequence->append_child(join_resolve(resource, "b", b_oid));
+    sequence->append_child(join_resolve(resource, "c", c_oid));
+    sequence->append_child(parent);
+    return {sequence, parent, a, b, c};
+}
+
+static void set_join_rows(components::planner::table_statistics_map_t& stats,
+                          std::uint64_t a,
+                          std::uint64_t b,
+                          std::uint64_t c) {
+    stats[components::catalog::oid_t{9201}].row_count = a;
+    stats[components::catalog::oid_t{9202}].row_count = b;
+    stats[components::catalog::oid_t{9203}].row_count = c;
+}
+
+static std::vector<std::string> join_leaf_order(const node_ptr& node) {
+    if (node->type() == node_type::aggregate_t) {
+        const auto* aggregate = static_cast<const node_aggregate_t*>(node.get());
+        return {node->result_alias().empty() ? static_cast<const std::string&>(aggregate->relname())
+                                             : node->result_alias()};
+    }
+    std::vector<std::string> result;
+    for (const auto& child : node->children()) {
+        auto child_order = join_leaf_order(child);
+        result.insert(result.end(), child_order.begin(), child_order.end());
+    }
+    return result;
+}
+
+static components::planner::optimizer_options_t join_order_only_options() {
+    components::planner::optimizer_options_t options;
+    options.enable_filter_pushdown = false;
+    options.enable_column_pruning = false;
+    options.enable_hash_join_rewrite = false;
+    return options;
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_greedy_reorders_three_tables") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    auto join = find_child_of_type(plan.parent, node_type::join_t);
+    REQUIRE(join_leaf_order(join) == std::vector<std::string>{"b", "c", "a"});
+    REQUIRE(join->children().back().get() == plan.a.get());
+    auto inner = join->children().front();
+    REQUIRE(inner->children().back().get() == plan.c.get());
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_remaps_parent_projection") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    auto group = find_child_of_type(plan.parent, node_type::group_t);
+    auto* projection = static_cast<scalar_expression_t*>(group->expressions().front().get());
+    REQUIRE(projection->key().path()[0] == 4);
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_filter_selectivity_changes_order") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(1));
+    auto filter = make_compare_expression(&resource,
+                                          compare_type::eq,
+                                          qualified_key(&resource, "b", "c1", side_t::undefined, 1),
+                                          pid);
+    auto plan = make_join_order_plan(&resource, join_type::inner, filter);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 500, 10000, 1000);
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    auto join = find_child_of_type(plan.parent, node_type::join_t);
+    auto order = join_leaf_order(join);
+    REQUIRE(order[0] == "a");
+    REQUIRE(order[1] == "b");
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_can_be_disabled") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    auto options = join_order_only_options();
+    options.enable_cbo_join_ordering = false;
+    components::planner::optimizer_context_t context{&resource, nullptr, options, &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"a", "b", "c"});
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_unknown_statistics_keeps_order") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    stats[components::catalog::oid_t{9201}].row_count = 1000;
+    stats[components::catalog::oid_t{9202}].row_count = 100;
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"a", "b", "c"});
+}
+
+TEST_CASE("optimizer_pipeline::leading_hint_forces_join_order") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::logical_plan::optimizer_hints_t hints;
+    hints.leading_order = std::vector<std::string>{"c", "b", "a"};
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}, &hints};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"c", "b", "a"});
+}
+
+TEST_CASE("optimizer_pipeline::no_cbo_keeps_join_order") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::logical_plan::optimizer_hints_t hints;
+    hints.disable_cbo = true;
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}, &hints};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"a", "b", "c"});
+}
+
+TEST_CASE("optimizer_pipeline::invalid_leading_hint_falls_back_to_cbo") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::logical_plan::optimizer_hints_t hints;
+    hints.leading_order = std::vector<std::string>{"a", "c", "b"};
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}, &hints};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"b", "c", "a"});
+}
+
+TEST_CASE("optimizer_pipeline::cbo_join_ordering_outer_join_keeps_order") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto plan = make_join_order_plan(&resource, join_type::left);
+    components::planner::table_statistics_map_t stats;
+    set_join_rows(stats, 1000, 100, 10);
+    components::planner::optimizer_context_t context{&resource, nullptr, join_order_only_options(), &stats, {}};
+
+    components::planner::optimizer_pipeline_t(context).run_post_validate(plan.sequence);
+
+    REQUIRE(join_leaf_order(find_child_of_type(plan.parent, node_type::join_t)) ==
+            std::vector<std::string>{"a", "b", "c"});
+}
+
 static components::expressions::compare_expression_ptr as_compare(const expression_ptr& expr) {
     return reinterpret_cast<const components::expressions::compare_expression_ptr&>(expr);
 }
@@ -1638,4 +1898,49 @@ TEST_CASE("create_plan_match::function_predicate_uses_match_over_full_scan") {
     auto op = services::planner::impl::create_plan_match(ctx, node, components::logical_plan::limit_t::unlimit());
     REQUIRE(op->type() == components::operators::operator_type::match);
     REQUIRE(op->left()->type() == components::operators::operator_type::full_scan);
+}
+
+
+TEST_CASE("scan_selection::full_scan_hint_overrides_cbo") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{801};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 10000);
+    ctx.scan_hints[table_oid] = components::logical_plan::scan_hint_t::full_scan;
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::full_scan);
+}
+
+TEST_CASE("scan_selection::index_scan_hint_overrides_cbo_when_compatible") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{802};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    set_row_count(ctx, table_oid, 1);
+    ctx.scan_hints[table_oid] = components::logical_plan::scan_hint_t::index_scan;
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::eq, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::index_scan);
+}
+
+TEST_CASE("scan_selection::index_scan_hint_requires_compatible_index") {
+    auto resource = std::pmr::synchronized_pool_resource();
+    auto params = make_parameter_node(&resource);
+    auto pid = params->add_parameter(int64_t(42));
+    constexpr auto table_oid = components::catalog::oid_t{803};
+    auto ctx = make_context_with_oid(&resource, table_oid, params.get());
+    add_single_field_index(ctx, &resource, "age", components::logical_plan::index_type::hashed);
+    ctx.scan_hints[table_oid] = components::logical_plan::scan_hint_t::index_scan;
+
+    auto predicate = as_compare(make_compare_expression(&resource, compare_type::gt, key(&resource, "age"), pid));
+    auto result = services::planner::impl::select_scan_access_path(ctx, table_oid, *predicate);
+    REQUIRE(result.selection.access_path == components::planner::scan_access_path_t::full_scan);
 }
